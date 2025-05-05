@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/invopop/jsonschema"
@@ -23,7 +24,7 @@ func main() {
 		return scanner.Text(), true
 	}
 
-	tools := []ToolDefinition{ReadFileDefinition}
+	tools := []ToolDefinition{ReadFileDefinition, ListFilesDefinition}
 	agent := NewAgent(&client, getUserMessage, tools)
 	err := agent.Run(context.TODO())
 	if err != nil {
@@ -83,7 +84,7 @@ func (a *Agent) Run(ctx context.Context) error {
 				fmt.Printf("\u001b[93mClaude\u001b[0m: %s\n", content.Text)
 
 			case "tool_use":
-				result := a.executeTool(content.Id, content.Name, content.Input)
+				result := a.executeTool(content.ID, content.Name, content.Input)
 				toolResults = append(toolResults, result)
 			}
 		}
@@ -98,24 +99,24 @@ func (a *Agent) Run(ctx context.Context) error {
 	return nil
 }
 
-func (a * Agent) executeTool(id, name string, input json.RawMessage) anthropic.ContentBlockParamUnion{
+func (a *Agent) executeTool(id, name string, input json.RawMessage) anthropic.ContentBlockParamUnion {
 	var toolDef ToolDefinition
 	var found bool
-	for _, tool : range a.tools{
-		if tool.Name == name{
-			toolDef = toolDef
+	for _, tool := range a.tools {
+		if tool.Name == name {
+			toolDef = tool
 			found = true
 			break
 		}
 	}
-	if !found{
+	if !found {
 		return anthropic.NewToolResultBlock(id, "tool not found", true)
 	}
 
 	fmt.Printf("\u001b[92mtool\u001b[0m: %s(%s)\n", name, input)
 
-	response, err:= toolDef.Function(input)
-	if err != nil{
+	response, err := toolDef.Function(input)
+	if err != nil {
 		return anthropic.NewToolResultBlock(id, err.Error(), true)
 	}
 	return anthropic.NewToolResultBlock(id, response, false)
@@ -188,4 +189,59 @@ func GenerateSchema[T any]() anthropic.ToolInputSchemaParam {
 	return anthropic.ToolInputSchemaParam{
 		Properties: schema.Properties,
 	}
+}
+
+var ListFilesDefinition = ToolDefinition{
+	Name:        "list_files",
+	Description: "Live files and directories at a given path. If no path is provided list the files in the current directory.",
+	InputSchema: ListFilesInputSchema,
+	Function:    ListFiles,
+}
+
+type ListFilesInput struct {
+	Path string `json:"path,omitempty" jsonschema_description:"Optional relative path to list files from. Defaults to current directory if not provided."`
+}
+
+var ListFilesInputSchema = GenerateSchema[ListFilesInput]()
+
+func ListFiles(input json.RawMessage) (string, error) {
+	listFilesInput := ListFilesInput{}
+	err := json.Unmarshal(input, &listFilesInput)
+	if err != nil {
+		panic(err)
+	}
+
+	dir := "."
+	if listFilesInput.Path != "" {
+		dir = listFilesInput.Path
+	}
+
+	var files []string
+	err = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		relPath, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+
+		if relPath != "." {
+			if info.IsDir() {
+				files = append(files, relPath+"/")
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	result, err := json.Marshal(files)
+	if err != nil {
+		return "", err
+	}
+	return string(result), nil
 }
